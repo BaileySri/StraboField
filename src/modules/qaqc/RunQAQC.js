@@ -17,6 +17,7 @@ const RunQAQC = ({dataset}) => {
   const isTestingMode = useSelector(state => state.project.isTestingMode);
   const {datasets, project} = useSelector(state => state.project);
   const readOnlyDatasetsIds = useSelector(state => state.project.readOnlyDatasetsIds) || [];
+  const isOnline = useSelector(state => state.connections.isOnline.isInternetReachable);
 
   const {initializeDownload} = useDownload();
   const toast = useToast();
@@ -42,6 +43,7 @@ const RunQAQC = ({dataset}) => {
       <ActionButton
         onPress={handleQAQCPressed}
         title={'Run QAQC'}
+        disabled={!isOnline}
       />
 
       {/* Modal */}
