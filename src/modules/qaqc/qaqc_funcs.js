@@ -65,6 +65,29 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
   }
 };
 
+// `reaction` must be one of: accepted | ignored | edited | rejected.
+// `field` identifies which advice item the reaction applies to;
+// `editedText` is the users rewritten wording
+// Returns the parsed JSON body ({ok, ...}) or throws.
+export const sendAdviceReaction = async (eventId, reaction, field, editedText, encodedLogin) => {
+  if (!eventId) throw new Error('event_id is required to record a reaction');
+  if (!encodedLogin) throw new Error('User credentials are missing');
+
+  // plainreq tells api.php to read $ACTION from $_GET['action']
+  // instead of expecting a JSON body.
+  const params = new URLSearchParams({
+    'plainreq': 'true',
+    'action': 'reaction',
+    'event_id': eventId,
+    'reaction': reaction,
+  });
+  if (field) params.set('field', field);
+  if (editedText) params.set('edited_text', editedText);
+
+  const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin));
+  return response;
+};
+
 export const runQAQC = async (dataset, currentProjectId, encodedLogin, toast, toast_id) => {
   console.log('runQAQC()');
   if (dataset && dataset.id) {
