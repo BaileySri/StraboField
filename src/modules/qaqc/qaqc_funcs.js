@@ -3,7 +3,13 @@ import {QAQC_PATHS} from '../../services/network/urls.constants';
 
 const basicAuth = token => ({type: 'basic', token});
 
-export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_id) => {
+// Default HTTP timeout in seconds. The frontend sends this to api.php, which
+// applies it to both the PHP child-process deadline and the Python requests
+// timeout, so one value bounds the whole run.
+export const QAQC_TIMEOUT_S = 60;
+
+export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_id,
+  timeoutS = QAQC_TIMEOUT_S) => {
   // Check for dataset id and encoded login
   console.log('startQAQC()');
   if (!dataset.id) {
@@ -34,11 +40,14 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
       'doAnnotate': 'true',
       'pid': projectID,
       'dsid': dataset.id,
+      'timeout': timeoutS,
     });
 
-    // Send the request
+    // Send the request. The fetch timeout is set slightly longer than the
+    // server-side deadline so the server's own TIMEOUT message wins over a
+    // client-side abort.
     const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin),
-      {responseType: 'document'});
+      {responseType: 'document', timeout: timeoutS * 1000 + 5000});
 
     // Block until response
     await response.text();
@@ -69,7 +78,8 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
 // `field` identifies which advice item the reaction applies to;
 // `editedText` is the users rewritten wording
 // Returns the parsed JSON body ({ok, ...}) or throws.
-export const sendAdviceReaction = async (eventId, reaction, field, editedText, encodedLogin) => {
+export const sendAdviceReaction = async (eventId, reaction, field, editedText, encodedLogin,
+  timeoutS = QAQC_TIMEOUT_S) => {
   if (!eventId) throw new Error('event_id is required to record a reaction');
   if (!encodedLogin) throw new Error('User credentials are missing');
 
@@ -80,19 +90,22 @@ export const sendAdviceReaction = async (eventId, reaction, field, editedText, e
     'action': 'reaction',
     'event_id': eventId,
     'reaction': reaction,
+    'timeout': timeoutS,
   });
   if (field) params.set('field', field);
   if (editedText) params.set('edited_text', editedText);
 
-  const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin));
+  const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin),
+    {timeout: timeoutS * 1000 + 5000});
   return response;
 };
 
-export const runQAQC = async (dataset, currentProjectId, encodedLogin, toast, toast_id) => {
+export const runQAQC = async (dataset, currentProjectId, encodedLogin, toast, toast_id,
+  timeoutS = QAQC_TIMEOUT_S) => {
   console.log('runQAQC()');
   if (dataset && dataset.id) {
     try {
-      return await startQAQC(dataset, currentProjectId, encodedLogin, toast, toast_id);
+      return await startQAQC(dataset, currentProjectId, encodedLogin, toast, toast_id, timeoutS);
     }
     catch (err) {
       throw (err);
