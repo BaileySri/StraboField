@@ -168,8 +168,11 @@ export const deleteRequest = async (url, auth) => {
 // `options` (e.g. {responseType: 'blob'}) only flags whether to hand back the raw response. It must not reach
 // buildHeaders, which would spread it into the request and send `responsetype: blob` as a header, tripping CORS.
 export const getRequest = async (url, auth, options = {}) => {
+  // timeout (ms) overrides the default fetch timeout
+  const timeout = options.timeout;
   try {
-    const response = await timeoutPromise(fetch(url, {method: 'GET', headers: buildHeaders(auth)}));
+    const response = await timeoutPromise(fetch(url, {method: 'GET', headers: buildHeaders(auth)}),
+      timeout ?? DEFAULT_TIMEOUT);
     return isEmpty(options) ? handleResponse(response, auth) : response;
   }
   catch (err) {
