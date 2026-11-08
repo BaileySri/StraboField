@@ -1,8 +1,10 @@
+import {useState} from 'react';
 import {ScrollView, StyleSheet, Text, View} from 'react-native';
 
+import {useToast} from 'react-native-toast-notifications';
 import {useSelector} from 'react-redux';
 
-import PageHeader from '../page/PageHeader';
+import {sendFactorReaction} from './qaqc_funcs';
 import QAQCAdvice from './QAQCAdvice';
 import {
   completenessPercent,
@@ -10,19 +12,133 @@ import {
   rulingColor,
   rulingLabel,
 } from './qaqcParse';
+import TextInputModal from '../../shared/ui/TextInputModal';
+import PageHeader from '../page/PageHeader';
+
+// Reactions per spot, keyed by `${facet}:${factor}`. Persisted so the UI
+// keeps its state across page changes and QAQC reruns.
+const FACTOR_REACTION_KEY = 'qaqc.factorReactions';
+
+const loadAllFactorReactions = () => {
+  try {
+    const raw = localStorage.getItem(FACTOR_REACTION_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    return (obj && typeof obj === 'object') ? obj : {};
+  }
+ catch (err) {
+    return {};
+  }
+
+};
+
+const loadFactorReactions = (spotId) => {
+  const all = loadAllFactorReactions();
+  return all[spotId] || {};
+};
+
+const removeReaction = (spotId, key) => {
+  const all = loadAllFactorReactions();
+  if (all[spotId]) {
+    delete all[spotId][key];
+    if (Object.keys(all[spotId]).length === 0) delete all[spotId];
+    localStorage.setItem(FACTOR_REACTION_KEY, JSON.stringify(all));
+  }
+};
 
 const QAQC = ({page}) => {
   /* Data Hooks */
 
   const existingQAQC = useSelector(state => state.spot.selectedSpot?.properties?.qaqc);
   const spotName = useSelector(state => state.spot.selectedSpot?.properties?.name);
+  const spotId = useSelector(state => state.spot.selectedSpot?.properties?.id);
+  const encodedLogin = useSelector(state => state.user.encoded_login);
+  const toast = useToast();
 
   /* Local State */
+
+  const [disagree, setDisagree] = useState(null);
+  const [reasonText, setReasonText] = useState('');
+  const [pendingDisagree, setPendingDisagree] = useState(false);
+  const [submitted, setSubmitted] = useState(() => loadFactorReactions(spotId));
+  const [sending, setSending] = useState(false);
+
+  /* Derived Variables */
 
   const qaqc = resolveQAQC(existingQAQC);
   const percent = completenessPercent(existingQAQC);
   const nIssues = (qaqc.completenessFactors || []).length;
   const nRichness = (qaqc.richnessFactors || []).length;
+
+  /* Logic Helpers */
+
+  const factorKey = (facet, factor) => `${facet}:${factor}`;
+
+  // Reactions are stored per spot so they survive page changes and QAQC reruns.
+  const saveReaction = (facet, factor, reaction) => {
+    const all = loadAllFactorReactions();
+    all[spotId] = {...(all[spotId] || {}), [factorKey(facet, factor)]: reaction};
+    localStorage.setItem(FACTOR_REACTION_KEY, JSON.stringify(all));
+  };
+
+  const openDisagree = (facet, index, factor) => {
+    if (submitted[factorKey(facet, factor)]) return;
+    setReasonText('');
+    setDisagree({facet, index, factor});
+  };
+
+  // Hide the row as soon as the user starts typing a reason.
+  const onReasonChange = (text) => {
+    setReasonText(text);
+    if (disagree) {
+      if (text.length > 0 && !pendingDisagree) {
+        setPendingDisagree(true);
+        saveReaction(disagree.facet, disagree.factor, 'disagree');
+      }
+      else if (text.length === 0 && pendingDisagree) {
+        setPendingDisagree(false);
+        removeReaction(spotId, factorKey(disagree.facet, disagree.factor));
+      }
+    }
+  };
+
+  const cancelDisagree = () => {
+    if (pendingDisagree && disagree) {
+      removeReaction(spotId, factorKey(disagree.facet, disagree.factor));
+      setPendingDisagree(false);
+    }
+    setDisagree(null);
+  };
+
+  /* Event Handlers */
+
+  const submitReaction = async (facet, factor, reaction, reason) => {
+    if (!spotId) {
+      toast.show('No spot id; cannot record a reaction.', {type: 'error', duration: 4000});
+      return;
+    }
+    if (submitted[factorKey(facet, factor)]) return;
+
+    setSending(true);
+    try {
+      await sendFactorReaction(spotId, facet, factor, reaction, reason, encodedLogin);
+      setSubmitted(prev => ({...prev, [factorKey(facet, factor)]: reaction}));
+      saveReaction(facet, factor, reaction);
+      toast.show('Feedback recorded.', {type: 'success', duration: 2000});
+    }
+    catch (err) {
+      // Undo the optimistic hide if the disagree was not recorded server-side
+      if (reaction === 'disagree' && pendingDisagree) {
+        removeReaction(spotId, factorKey(facet, factor));
+      }
+      console.error('sendFactorReaction failed', err);
+      toast.show('Could not record feedback.', {type: 'error', duration: 4000});
+    }
+    finally {
+      setSending(false);
+      setPendingDisagree(false);
+      setDisagree(null);
+    }
+  };
 
   /* View */
 
@@ -37,7 +153,7 @@ const QAQC = ({page}) => {
         </Text>
       ) : (
         <ScrollView style={styles.scroll}>
-          {/* (b) Score / summary header */}
+          {/* Score header */}
           <View style={styles.scoreCard}>
             <View style={styles.scoreTop}>
               <View style={[styles.rulingBadge, {backgroundColor: rulingColor(qaqc.ruling)}]}>
@@ -65,7 +181,7 @@ const QAQC = ({page}) => {
             {spotName ? <Text style={styles.spotName}>{spotName}</Text> : null}
           </View>
 
-          {/* Per-facet breakdown of what's missing */}
+          {/* Missing fields, grouped by facet */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>WHAT'S MISSING</Text>
             {qaqc.facets.length === 0 ? (
@@ -73,9 +189,39 @@ const QAQC = ({page}) => {
             ) : qaqc.facets.map(facet => (
               <View key={facet.key} style={styles.facet}>
                 <Text style={styles.facetLabel}>{facet.label}</Text>
-                {facet.factors.map((factor, i) => (
-                  <Text key={i} style={styles.facetItem}>• {factor}</Text>
-                ))}
+                {facet.factors.map((factor, i) => {
+                  const done = submitted[factorKey(facet.key, factor)];
+                  // Disagreed issues stay hidden, including while the reason is being typed.
+                  const hidden = done === 'disagree'
+                    || (pendingDisagree && disagree
+                      && disagree.facet === facet.key && disagree.factor === factor);
+                  if (hidden) return null;
+                  return (
+                    <View key={i} style={styles.facetRow}>
+                      <Text numberOfLines={2} style={styles.facetItem}>• {factor}</Text>
+                      <View style={styles.reactionButtons}>
+                        <Text
+                          accessibilityLabel={'Agree with this issue'}
+                          onPress={() => submitReaction(facet.key, factor, 'agree', null)}
+                          style={[styles.reactionBtn, done === 'agree' && styles.reactionBtnActive,
+                            done === 'disagree' && styles.reactionBtnDisabled,
+                            sending && !done && {opacity: 0.5}]}
+                        >
+                          <Text style={styles.agreeIcon}>✓</Text>
+                        </Text>
+                        <Text
+                          accessibilityLabel={'Disagree with this issue'}
+                          onPress={() => openDisagree(facet.key, i, factor)}
+                          style={[styles.reactionBtn, done === 'disagree' && styles.reactionBtnActive,
+                            done === 'agree' && styles.reactionBtnDisabled,
+                            sending && !done && {opacity: 0.5}]}
+                        >
+                          <Text style={styles.disagreeIcon}>✗</Text>
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })}
               </View>
             ))}
           </View>
@@ -91,7 +237,7 @@ const QAQC = ({page}) => {
             </View>
           ) : null}
 
-          {/* LLM advice when applicable */}
+          {/* LLM suggestion */}
           {qaqc.advice ? <QAQCAdvice advice={qaqc.advice}/> : null}
 
           {/* Raw notes for debugging */}
@@ -103,61 +249,175 @@ const QAQC = ({page}) => {
           ) : null}
         </ScrollView>
       )}
+
+      {/* Disagree reason modal */}
+      {disagree && (
+        <TextInputModal
+          buttonText={'Submit Disagreement'}
+          dialogTitle={'Why do you disagree?'}
+          multiline
+          onActionPressed={() => submitReaction(disagree.facet, disagree.factor, 'disagree', reasonText)}
+          onCancelPress={cancelDisagree}
+          onChangeText={onReasonChange}
+          placeholder={'Explain why this issue is not a real problem...'}
+          value={reasonText}
+          visible
+        />
+      )}
     </View>
   );
 };
 
-// The following styles is for the QAQC page.
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f7f7f7',
+  agreeIcon: {
+    color: '#2e8b57',
+    fontSize: 14,
+    fontWeight: '700',
   },
-  scroll: {
+  container: {
+    backgroundColor: '#f7f7f7',
     flex: 1,
-    padding: 10,
+  },
+  disagreeIcon: {
+    color: '#c0392b',
+    fontSize: 14,
+    fontWeight: '700',
   },
   empty: {
     color: '#333333',
     fontSize: 12,
     padding: 10,
   },
-  // Score card
-  scoreCard: {
-    backgroundColor: '#ffffff',
+  facet: {
+    marginBottom: 8,
+  },
+  facetItem: {
+    color: '#333333',
+    flex: 1,
+    fontSize: 12,
+    paddingRight: 8,
+  },
+  facetLabel: {
+    color: '#2471a3',
+    fontSize: 12,
+    fontWeight: '500',
+    marginBottom: 2,
+  },
+  facetRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    marginBottom: 4,
+  },
+  mlCard: {
+    backgroundColor: '#eaf2f8',
+    borderColor: '#a9cce3',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#d3d3d3',
-    padding: 12,
     marginBottom: 10,
+    padding: 10,
   },
-  scoreTop: {
-    flexDirection: 'row',
+  mlText: {
+    color: '#1a5276',
+    fontSize: 12,
+  },
+  mlTitle: {
+    color: '#1a5276',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  rawNotes: {
+    marginTop: 10,
+  },
+  rawText: {
+    color: '#777777',
+    fontFamily: 'monospace',
+    fontSize: 11,
+  },
+  reactionBtn: {
+    borderColor: '#cfd8dc',
+    borderRadius: 4,
+    borderWidth: 1,
+    color: '#2471a3',
+    fontSize: 11,
+    marginHorizontal: 2,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  reactionBtnActive: {
+    backgroundColor: '#eaf2f8',
+    color: '#1a5276',
+    fontWeight: '700',
+  },
+  reactionBtnDisabled: {
+    opacity: 0.3,
+  },
+  reactionButtons: {
     alignItems: 'center',
-    marginBottom: 10,
+    flexDirection: 'row',
   },
   rulingBadge: {
     borderRadius: 6,
+    marginRight: 10,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    marginRight: 10,
   },
   rulingBadgeText: {
     color: '#ffffff',
     fontSize: 13,
     fontWeight: '700',
   },
+  scoreCard: {
+    backgroundColor: '#ffffff',
+    borderColor: '#d3d3d3',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 10,
+    padding: 12,
+  },
+  scoreStats: {
+    flexDirection: 'row',
+  },
   scoreTitle: {
     color: '#333333',
     fontSize: 13,
     fontWeight: '500',
   },
-  scoreStats: {
+  scoreTop: {
+    alignItems: 'center',
     flexDirection: 'row',
+    marginBottom: 10,
+  },
+  scroll: {
+    flex: 1,
+    padding: 10,
+  },
+  section: {
+    marginBottom: 10,
+  },
+  sectionEmpty: {
+    color: '#666666',
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  sectionTitle: {
+    color: '#555555',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  spotName: {
+    color: '#666666',
+    fontSize: 11,
+    marginTop: 8,
   },
   stat: {
-    flex: 1,
     alignItems: 'center',
+    flex: 1,
+  },
+  statLabel: {
+    color: '#888888',
+    fontSize: 10,
   },
   statValue: {
     color: '#1a5276',
@@ -166,72 +426,6 @@ const styles = StyleSheet.create({
   },
   statValueMuted: {
     color: '#bbbbbb',
-  },
-  statLabel: {
-    color: '#888888',
-    fontSize: 10,
-  },
-  spotName: {
-    color: '#666666',
-    fontSize: 11,
-    marginTop: 8,
-  },
-  // Sections
-  section: {
-    marginBottom: 10,
-  },
-  sectionTitle: {
-    color: '#555555',
-    fontSize: 11,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  sectionEmpty: {
-    color: '#666666',
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
-  facet: {
-    marginBottom: 8,
-  },
-  facetLabel: {
-    color: '#2471a3',
-    fontSize: 12,
-    fontWeight: '500',
-    marginBottom: 2,
-  },
-  facetItem: {
-    color: '#333333',
-    fontSize: 12,
-    paddingLeft: 8,
-  },
-  // ML card
-  mlCard: {
-    backgroundColor: '#eaf2f8',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#a9cce3',
-    padding: 10,
-    marginBottom: 10,
-  },
-  mlTitle: {
-    color: '#1a5276',
-    fontSize: 11,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  mlText: {
-    color: '#1a5276',
-    fontSize: 12,
-  },
-  // Raw notes
-  rawNotes: {
-    marginTop: 10,
-  },
-  rawText: {
-    color: '#777777',
-    fontSize: 11,
-    fontFamily: 'monospace',
   },
 });
 

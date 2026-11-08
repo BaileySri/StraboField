@@ -4,27 +4,44 @@ import {ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useToast} from 'react-native-toast-notifications';
 import {useSelector} from 'react-redux';
 
-import TextInputModal from '../../shared/ui/TextInputModal';
 import {sendAdviceReaction} from './qaqc_funcs';
+import TextInputModal from '../../shared/ui/TextInputModal';
 
-// Severity: colour
+// Point badge colours by severity
 const SEVERITY_COLORS = {
   error: '#c0392b',
-  warning: '#e67e22',
   info: '#2471a3',
-};
-const SEVERITY_LABELS = {
-  error: 'Error',
-  warning: 'Warning',
-  info: 'Info',
+  warning: '#e67e22',
 };
 
-// These are the reactions a user can send, an ignored reaction is registered
-// if they run QAQC without having done anything to the Spot with QAQC notes
-const REACTIONS = ['accepted', 'edited', 'rejected'];
+// Disagreed advice stays hidden until a new QAQC run makes a new event_id
+const DISAGREED_STORAGE_KEY = 'qaqc.disagreedAdviceEventIds';
+
+const loadDisagreedEventIds = () => {
+  try {
+    const raw = localStorage.getItem(DISAGREED_STORAGE_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(arr) ? arr : []);
+  }
+ catch (err) {
+    return new Set();
+  }
+
+};
+
+const persistDisagreedEventId = (eventId) => {
+  try {
+    const set = loadDisagreedEventIds();
+    set.add(eventId);
+    localStorage.setItem(DISAGREED_STORAGE_KEY, JSON.stringify(Array.from(set)));
+  }
+ catch (err) {
+    console.warn('Could not persist disagreed advice id', err);
+  }
+
+};
 
 const QAQCAdvice = ({advice}) => {
-
   /* Data Hooks */
 
   const encodedLogin = useSelector(state => state.user.encoded_login);
@@ -32,34 +49,39 @@ const QAQCAdvice = ({advice}) => {
 
   /* Local State */
 
-  // Which advice item is open in the edit modal.
-  const [editingIndex, setEditingIndex] = useState(null);
-  const [editText, setEditText] = useState('');
-  // Reactions already sent this session, keyed by `${event_id}:${index}`.
-  const [submitted, setSubmitted] = useState({});
+  const [done, setDone] = useState(() =>
+    advice?.event_id && loadDisagreedEventIds().has(advice.event_id) ? 'disagree' : null,
+  );
   const [sending, setSending] = useState(false);
+  const [disagreeOpen, setDisagreeOpen] = useState(false);
+  const [reasonText, setReasonText] = useState('');
+
+  /* Derived Variables */
 
   const eventId = advice?.event_id;
-  const items = advice?.items || [];
+  const points = advice?.points || [];
 
-  const openEdit = index => {
-    setEditText(items[index]?.action || '');
-    setEditingIndex(index);
+  /* Logic Helpers */
+
+  const openDisagree = () => {
+    if (done) return;
+    setReasonText('');
+    setDisagreeOpen(true);
   };
 
-  const submitReaction = async (index, reaction) => {
+  /* Event Handlers */
+
+  const submit = async (reaction, reason) => {
     if (!eventId) {
-      toast.show('This advice has no event id; cannot record a reaction.', {type: 'error', duration: 4000});
+      toast.show('No suggestion id; cannot record a reaction.', {type: 'error', duration: 4000});
       return;
     }
-    const key = `${eventId}:${index}`;
-    if (submitted[key]) return;
-
+    if (done) return;
     setSending(true);
     try {
-      await sendAdviceReaction(eventId, reaction, items[index]?.field,
-        reaction === 'edited' ? editText : null, encodedLogin);
-      setSubmitted(prev => ({...prev, [key]: reaction}));
+      await sendAdviceReaction(eventId, reaction, reason, encodedLogin);
+      setDone(reaction);
+      if (reaction === 'disagree') persistDisagreedEventId(eventId);
       toast.show('Feedback recorded.', {type: 'success', duration: 2000});
     }
     catch (err) {
@@ -68,18 +90,19 @@ const QAQCAdvice = ({advice}) => {
     }
     finally {
       setSending(false);
-      setEditingIndex(null);
+      setDisagreeOpen(false);
     }
   };
 
   /* View */
 
   if (!advice) return null;
+  if (done === 'disagree') return null;
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>AI SUGGESTIONS</Text>
+        <Text style={styles.headerTitle}>AI SUGGESTION</Text>
         <Text style={styles.headerMeta}>
           {advice.model ? `${advice.model} · ` : ''}{advice.version ? `v${advice.version}` : ''}
         </Text>
@@ -87,74 +110,65 @@ const QAQCAdvice = ({advice}) => {
 
       {advice.summary ? <Text style={styles.summary}>{advice.summary}</Text> : null}
 
-      {items.length === 0 ? (
-        <Text style={styles.empty}>No specific suggestions. The spot's completeness issues are listed above.</Text>
-      ) : (
+      {points.length > 0 ? (
         <ScrollView style={styles.list}>
-          {items.map((item, index) => {
-            const key = `${eventId}:${index}`;
-            const done = submitted[key];
-            return (
-              <View key={key} style={styles.item}>
-                <View style={[styles.itemBadge, {backgroundColor: SEVERITY_COLORS[item.severity] || '#888'}]}>
-                  <Text style={styles.itemBadgeText}>{SEVERITY_LABELS[item.severity] || item.severity}</Text>
-                </View>
-                <View style={styles.itemBody}>
-                  {item.field && item.field !== 'spot'
-                    ? <Text style={styles.itemField}>{item.field}</Text>
-                    : null}
-                  <Text style={styles.itemAction}>{item.action}</Text>
-                  {item.reason ? <Text style={styles.itemReason}>{item.reason}</Text> : null}
-                </View>
+          {points.map((p, index) => (
+            <View key={index} style={styles.point}>
+              <View style={[styles.pointBadge, {backgroundColor: SEVERITY_COLORS[p.severity] || '#888'}]}>
+                <Text style={styles.pointBadgeText}>{(p.severity || '').toUpperCase()}</Text>
               </View>
-            );
-          })}
+              <View style={styles.pointBody}>
+                {p.field && p.field !== 'spot'
+                  ? <Text style={styles.pointField}>{p.field}</Text>
+                  : null}
+                <Text style={styles.pointAction}>{p.action}</Text>
+                {p.reason ? <Text style={styles.pointReason}>{p.reason}</Text> : null}
+              </View>
+            </View>
+          ))}
         </ScrollView>
-      )}
-
-      {/* Per-issue reaction controls */}
-      {items.length > 0 && eventId ? (
-        <View style={styles.reactions}>
-          <Text style={styles.reactionsHint}>React to each suggestion to help improve the model:</Text>
-          {items.map((item, index) => {
-            const key = `${eventId}:${index}`;
-            const done = submitted[key];
-            return (
-              <View key={key} style={styles.reactionRow}>
-                <Text style={styles.reactionLabel} numberOfLines={1}>{item.field && item.field !== 'spot' ? item.field : item.action}</Text>
-                <View style={styles.reactionButtons}>
-                  {REACTIONS.map(r => (
-                    <Text
-                      key={r}
-                      onPress={() => (r === 'edited' ? openEdit(index) : submitReaction(index, r))}
-                      style={[styles.reactionBtn, done === r && styles.reactionBtnActive,
-                        sending && !done && {opacity: 0.5}]}
-                    >
-                      {done === r ? `✓ ${r}` : r}
-                    </Text>
-                  ))}
-                </View>
-              </View>
-            );
-          })}
-        </View>
       ) : null}
 
       {advice.dropped_by_gate ? (
         <Text style={styles.dropped}>{advice.dropped_by_gate} suggestion(s) were filtered out by the validation gate (unverifiable fields).</Text>
       ) : null}
 
-      {/* Edit modal for the 'edited' reaction */}
-      {editingIndex !== null && (
+      {/* Agree/disagree reaction */}
+      <View style={styles.reactRow}>
+        <Text style={styles.reactPrompt}>Do you agree with this suggestion?</Text>
+        <View style={styles.reactionButtons}>
+          <Text
+            accessibilityLabel={'Agree with this suggestion'}
+            onPress={() => submit('agree', null)}
+            style={[styles.reactionBtn, done === 'agree' && styles.reactionBtnActive,
+              done === 'disagree' && styles.reactionBtnDisabled,
+              sending && !done && {opacity: 0.5}]}
+          >
+            <Text style={styles.agreeIcon}>✓</Text>
+          </Text>
+          <Text
+            accessibilityLabel={'Disagree with this suggestion'}
+            onPress={openDisagree}
+            style={[styles.reactionBtn, done === 'disagree' && styles.reactionBtnActive,
+              done === 'agree' && styles.reactionBtnDisabled,
+              sending && !done && {opacity: 0.5}]}
+          >
+            <Text style={styles.disagreeIcon}>✗</Text>
+          </Text>
+        </View>
+      </View>
+
+      {/* Disagree reason modal */}
+      {disagreeOpen && (
         <TextInputModal
-          buttonText={'Save Edit'}
-          dialogTitle={'Edit Suggestion'}
+          buttonText={'Submit Disagreement'}
+          dialogTitle={'Why do you disagree with this suggestion?'}
           multiline
-          onCancelPress={() => setEditingIndex(null)}
-          onChangeText={setEditText}
-          onActionPressed={() => submitReaction(editingIndex, 'edited')}
-          placeholder={'Rewrite this suggestion...'}
-          value={editText}
+          onActionPressed={() => submit('disagree', reasonText)}
+          onCancelPress={() => setDisagreeOpen(false)}
+          onChangeText={setReasonText}
+          placeholder={'Explain why this suggestion is wrong or unhelpful...'}
+          value={reasonText}
           visible
         />
       )}
@@ -162,114 +176,23 @@ const QAQCAdvice = ({advice}) => {
   );
 };
 
-// This styles is just for the LLM advice section when it appears
 const styles = StyleSheet.create({
+  agreeIcon: {
+    color: '#2e8b57',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   container: {
     backgroundColor: '#f7f7f7',
+    borderColor: '#d3d3d3',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#d3d3d3',
     marginVertical: 8,
     padding: 10,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  headerTitle: {
-    color: '#2471a3',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  headerMeta: {
-    color: '#888888',
-    fontSize: 10,
-  },
-  summary: {
-    color: '#000000',
-    fontSize: 12,
-    marginBottom: 8,
-  },
-  empty: {
-    color: '#666666',
-    fontSize: 11,
-    fontStyle: 'italic',
-  },
-  list: {
-    marginBottom: 8,
-  },
-  item: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  itemBadge: {
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    marginRight: 8,
-  },
-  itemBadgeText: {
-    color: '#ffffff',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  itemBody: {
-    flex: 1,
-  },
-  itemField: {
-    color: '#666666',
-    fontSize: 10,
-    fontWeight: '500',
-  },
-  itemAction: {
-    color: '#000000',
-    fontSize: 12,
-  },
-  itemReason: {
-    color: '#555555',
-    fontSize: 11,
-  },
-  reactions: {
-    borderTopWidth: 1,
-    borderTopColor: '#d3d3d3',
-    paddingTop: 8,
-  },
-  reactionsHint: {
-    color: '#555555',
-    fontSize: 10,
-    marginBottom: 6,
-  },
-  reactionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-  },
-  reactionLabel: {
-    color: '#333333',
-    fontSize: 11,
-    flex: 1,
-    marginRight: 8,
-  },
-  reactionButtons: {
-    flexDirection: 'row',
-  },
-  reactionBtn: {
-    color: '#2471a3',
-    fontSize: 11,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    marginHorizontal: 2,
-    borderWidth: 1,
-    borderColor: '#cfd8dc',
-    borderRadius: 4,
-  },
-  reactionBtnActive: {
-    backgroundColor: '#eaf2f8',
-    color: '#1a5276',
+  disagreeIcon: {
+    color: '#c0392b',
+    fontSize: 14,
     fontWeight: '700',
   },
   dropped: {
@@ -277,6 +200,94 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontStyle: 'italic',
     marginTop: 6,
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  headerMeta: {
+    color: '#888888',
+    fontSize: 10,
+  },
+  headerTitle: {
+    color: '#2471a3',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  list: {
+    marginBottom: 8,
+  },
+  point: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    marginBottom: 8,
+  },
+  pointAction: {
+    color: '#000000',
+    fontSize: 12,
+  },
+  pointBadge: {
+    borderRadius: 4,
+    marginRight: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  pointBadgeText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  pointBody: {
+    flex: 1,
+  },
+  pointField: {
+    color: '#666666',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  pointReason: {
+    color: '#555555',
+    fontSize: 11,
+  },
+  reactPrompt: {
+    color: '#555555',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  reactRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  reactionBtn: {
+    borderColor: '#cfd8dc',
+    borderRadius: 4,
+    borderWidth: 1,
+    color: '#2471a3',
+    fontSize: 11,
+    marginHorizontal: 2,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  reactionBtnActive: {
+    backgroundColor: '#eaf2f8',
+    color: '#1a5276',
+    fontWeight: '700',
+  },
+  reactionBtnDisabled: {
+    opacity: 0.3,
+  },
+  reactionButtons: {
+    alignItems: 'center',
+    flexDirection: 'row',
+  },
+  summary: {
+    color: '#000000',
+    fontSize: 12,
+    marginBottom: 8,
   },
 });
 

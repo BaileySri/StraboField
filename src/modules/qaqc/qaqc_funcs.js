@@ -3,9 +3,7 @@ import {QAQC_PATHS} from '../../services/network/urls.constants';
 
 const basicAuth = token => ({type: 'basic', token});
 
-// Default HTTP timeout in seconds. The frontend sends this to api.php, which
-// applies it to both the PHP child-process deadline and the Python requests
-// timeout, so one value bounds the whole run.
+// Timeout in seconds, applied server-side to the whole run
 export const QAQC_TIMEOUT_S = 60;
 
 export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_id,
@@ -33,7 +31,6 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
     });
 
   try {
-    // Python script parameters
     const params = new URLSearchParams({
       'action': 'completeness',
       'plainreq': 'true',
@@ -43,9 +40,7 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
       'timeout': timeoutS,
     });
 
-    // Send the request. The fetch timeout is set slightly longer than the
-    // server-side deadline so the server's own TIMEOUT message wins over a
-    // client-side abort.
+    // Give the server's own TIMEOUT message a chance to win
     const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin),
       {responseType: 'document', timeout: timeoutS * 1000 + 5000});
 
@@ -56,8 +51,7 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
       throw new Error(`HTTP error. status: ${response.status}`);
     }
 
-    // I think we want to force the user to download QAQC notes to avoid desync with local datasets
-    // This just stalls for 3 seconds, the initializeDownload call is in DatasetDetails
+    // Stall so the user downloads the notes before the local datasets desync
     for (let iter = 3; iter > 0; iter--) {
       toast.update(toast_id,
         `Downloading QAQC notes in ${iter} seconds.`,
@@ -74,17 +68,12 @@ export const startQAQC = async (dataset, projectID, encodedLogin, toast, toast_i
   }
 };
 
-// `reaction` must be one of: accepted | ignored | edited | rejected.
-// `field` identifies which advice item the reaction applies to;
-// `editedText` is the users rewritten wording
-// Returns the parsed JSON body ({ok, ...}) or throws.
-export const sendAdviceReaction = async (eventId, reaction, field, editedText, encodedLogin,
+// Send a reaction to the LLM suggestion for a spot. A disagree needs a reason.
+export const sendAdviceReaction = async (eventId, reaction, reason, encodedLogin,
   timeoutS = QAQC_TIMEOUT_S) => {
   if (!eventId) throw new Error('event_id is required to record a reaction');
   if (!encodedLogin) throw new Error('User credentials are missing');
 
-  // plainreq tells api.php to read $ACTION from $_GET['action']
-  // instead of expecting a JSON body.
   const params = new URLSearchParams({
     'plainreq': 'true',
     'action': 'reaction',
@@ -92,11 +81,38 @@ export const sendAdviceReaction = async (eventId, reaction, field, editedText, e
     'reaction': reaction,
     'timeout': timeoutS,
   });
-  if (field) params.set('field', field);
-  if (editedText) params.set('edited_text', editedText);
+  if (reason) params.set('reason', reason);
 
   const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin),
     {timeout: timeoutS * 1000 + 5000});
+  if (!response.ok) {
+    throw new Error(`server rejected the reaction (HTTP ${response.status})`);
+  }
+  return response;
+};
+
+// Send an agree/disagree reaction to one completeness issue
+export const sendFactorReaction = async (spotId, facet, factor, reaction, reason, encodedLogin,
+  timeoutS = QAQC_TIMEOUT_S) => {
+  if (!spotId) throw new Error('spot_id is required to record a factor reaction');
+  if (!encodedLogin) throw new Error('User credentials are missing');
+
+  const params = new URLSearchParams({
+    'plainreq': 'true',
+    'action': 'factor_reaction',
+    'spot_id': spotId,
+    'facet': facet,
+    'factor': factor,
+    'reaction': reaction,
+    'timeout': timeoutS,
+  });
+  if (reason) params.set('reason', reason);
+
+  const response = await getRequest(`${QAQC_PATHS.URL}/api.php?${params.toString()}`, basicAuth(encodedLogin),
+    {timeout: timeoutS * 1000 + 5000});
+  if (!response.ok) {
+    throw new Error(`server rejected the reaction (HTTP ${response.status})`);
+  }
   return response;
 };
 
