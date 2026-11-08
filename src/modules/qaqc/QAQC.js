@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import {ScrollView, StyleSheet, Text, View} from 'react-native';
 
 import {useToast} from 'react-native-toast-notifications';
@@ -36,15 +36,6 @@ const loadFactorReactions = (spotId) => {
   return all[spotId] || {};
 };
 
-const removeReaction = (spotId, key) => {
-  const all = loadAllFactorReactions();
-  if (all[spotId]) {
-    delete all[spotId][key];
-    if (Object.keys(all[spotId]).length === 0) delete all[spotId];
-    localStorage.setItem(FACTOR_REACTION_KEY, JSON.stringify(all));
-  }
-};
-
 const QAQC = ({page}) => {
   /* Data Hooks */
 
@@ -58,9 +49,16 @@ const QAQC = ({page}) => {
 
   const [disagree, setDisagree] = useState(null);
   const [reasonText, setReasonText] = useState('');
-  const [pendingDisagree, setPendingDisagree] = useState(false);
   const [submitted, setSubmitted] = useState(() => loadFactorReactions(spotId));
   const [sending, setSending] = useState(false);
+
+  // The page stays mounted across spot changes, so re-read the stored
+  // reactions whenever the selected spot changes.
+  useEffect(() => {
+    setSubmitted(loadFactorReactions(spotId));
+    setDisagree(null);
+    setReasonText('');
+  }, [spotId]);
 
   /* Derived Variables */
 
@@ -86,29 +84,6 @@ const QAQC = ({page}) => {
     setDisagree({facet, index, factor});
   };
 
-  // Hide the row as soon as the user starts typing a reason.
-  const onReasonChange = (text) => {
-    setReasonText(text);
-    if (disagree) {
-      if (text.length > 0 && !pendingDisagree) {
-        setPendingDisagree(true);
-        saveReaction(disagree.facet, disagree.factor, 'disagree');
-      }
-      else if (text.length === 0 && pendingDisagree) {
-        setPendingDisagree(false);
-        removeReaction(spotId, factorKey(disagree.facet, disagree.factor));
-      }
-    }
-  };
-
-  const cancelDisagree = () => {
-    if (pendingDisagree && disagree) {
-      removeReaction(spotId, factorKey(disagree.facet, disagree.factor));
-      setPendingDisagree(false);
-    }
-    setDisagree(null);
-  };
-
   /* Event Handlers */
 
   const submitReaction = async (facet, factor, reaction, reason) => {
@@ -126,16 +101,11 @@ const QAQC = ({page}) => {
       toast.show('Feedback recorded.', {type: 'success', duration: 2000});
     }
     catch (err) {
-      // Undo the optimistic hide if the disagree was not recorded server-side
-      if (reaction === 'disagree' && pendingDisagree) {
-        removeReaction(spotId, factorKey(facet, factor));
-      }
       console.error('sendFactorReaction failed', err);
       toast.show('Could not record feedback.', {type: 'error', duration: 4000});
     }
     finally {
       setSending(false);
-      setPendingDisagree(false);
       setDisagree(null);
     }
   };
@@ -191,11 +161,11 @@ const QAQC = ({page}) => {
                 <Text style={styles.facetLabel}>{facet.label}</Text>
                 {facet.factors.map((factor, i) => {
                   const done = submitted[factorKey(facet.key, factor)];
-                  // Disagreed issues stay hidden, including while the reason is being typed.
-                  const hidden = done === 'disagree'
-                    || (pendingDisagree && disagree
-                      && disagree.facet === facet.key && disagree.factor === factor);
-                  if (hidden) return null;
+                  // This row's disagree modal is open (reason being typed).
+                  const disagreeOpen = disagree
+                    && disagree.facet === facet.key && disagree.factor === factor;
+                  // Hide only once the server has recorded the disagree.
+                  if (done === 'disagree') return null;
                   return (
                     <View key={i} style={styles.facetRow}>
                       <Text numberOfLines={2} style={styles.facetItem}>• {factor}</Text>
@@ -204,7 +174,7 @@ const QAQC = ({page}) => {
                           accessibilityLabel={'Agree with this issue'}
                           onPress={() => submitReaction(facet.key, factor, 'agree', null)}
                           style={[styles.reactionBtn, done === 'agree' && styles.reactionBtnActive,
-                            done === 'disagree' && styles.reactionBtnDisabled,
+                            disagreeOpen && styles.reactionBtnDisabled,
                             sending && !done && {opacity: 0.5}]}
                         >
                           <Text style={styles.agreeIcon}>✓</Text>
@@ -212,7 +182,7 @@ const QAQC = ({page}) => {
                         <Text
                           accessibilityLabel={'Disagree with this issue'}
                           onPress={() => openDisagree(facet.key, i, factor)}
-                          style={[styles.reactionBtn, done === 'disagree' && styles.reactionBtnActive,
+                          style={[styles.reactionBtn, disagreeOpen && styles.reactionBtnActive,
                             done === 'agree' && styles.reactionBtnDisabled,
                             sending && !done && {opacity: 0.5}]}
                         >
@@ -257,8 +227,8 @@ const QAQC = ({page}) => {
           dialogTitle={'Why do you disagree?'}
           multiline
           onActionPressed={() => submitReaction(disagree.facet, disagree.factor, 'disagree', reasonText)}
-          onCancelPress={cancelDisagree}
-          onChangeText={onReasonChange}
+          onCancelPress={() => setDisagree(null)}
+          onChangeText={setReasonText}
           placeholder={'Explain why this issue is not a real problem...'}
           value={reasonText}
           visible
